@@ -1,0 +1,15 @@
+[project]
+name = "moviemaestro"
+version = "0.1.0"
+description = "Service that orchestrates Letterboxd film data scraping for the bpdiscord Hater Rankings refresh pipeline"
+requires-python = ">=3.11"
+dependencies = [
+    "letterboxdpy @ git+https://github.com/nmcassa/letterboxdpy.git@v6.5.4",
+]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["main"]
