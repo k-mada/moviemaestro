@@ -51,6 +51,73 @@ class TestSuccess:
         assert body["job_id"] == JOB_ID
         assert body["status"] == "accepted"
 
+    def test_orchestrator_is_spawned_with_job_id(self, client, spawned_jobs):
+        # /start must hand off to orchestrator.run — the response is just an ack.
+        r = client.post("/start", headers=_auth(), json={"job_id": JOB_ID})
+        assert r.status_code == 202
+        assert len(spawned_jobs) == 1
+        assert str(spawned_jobs[0]["job_id"]) == JOB_ID
+
+    def test_failed_auth_does_not_spawn_orchestrator(self, client, spawned_jobs):
+        client.post("/start", json={"job_id": JOB_ID})  # no auth
+        client.post("/start", headers={"Authorization": "Bearer wrong"}, json={"job_id": JOB_ID})
+        assert spawned_jobs == []
+
+    def test_invalid_payload_does_not_spawn_orchestrator(self, client, spawned_jobs):
+        client.post("/start", headers=_auth(), json={"job_id": "bogus"})
+        assert spawned_jobs == []
+
+
+class TestIdempotency:
+    """Same job_id /start retried in-process should not double-spawn.
+
+    Uses httpx.AsyncClient (not TestClient) because TestClient's portal
+    appears to GC pending background tasks between sync requests, defeating
+    the in-process state check we're trying to verify."""
+
+    async def test_duplicate_start_returns_already_running(self, monkeypatch):
+        import asyncio
+        from httpx import ASGITransport, AsyncClient
+
+        from app.main import _active_jobs, app
+        from app.pipeline import orchestrator as orch_mod
+        from app.settings import get_settings
+
+        spawned: list[str] = []
+
+        async def never_done(supabase, job_id):
+            spawned.append(str(job_id))
+            await asyncio.sleep(60)
+
+        monkeypatch.setattr(orch_mod, "run", never_done)
+        monkeypatch.setattr("app.main.get_supabase", lambda: "FAKE")
+        app.dependency_overrides[get_settings] = _override_settings_for_async
+
+        try:
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://t") as ac:
+                r1 = await ac.post("/start", headers=_auth(), json={"job_id": JOB_ID})
+                r2 = await ac.post("/start", headers=_auth(), json={"job_id": JOB_ID})
+            assert r1.status_code == 202
+            assert r1.json()["status"] == "accepted"
+            assert r2.status_code == 202
+            assert r2.json()["status"] == "already_running"
+            assert len(spawned) == 1
+        finally:
+            app.dependency_overrides.clear()
+            for t in list(_active_jobs.values()):
+                t.cancel()
+            _active_jobs.clear()
+
+
+def _override_settings_for_async():
+    from app.settings import Settings
+    return Settings(
+        supabase_url="https://test.supabase.co",
+        supabase_service_role_key="k",
+        worker_shared_secret=TEST_SECRET,
+    )
+
 
 class TestPayloadValidation:
     def test_missing_job_id_returns_422(self, client):

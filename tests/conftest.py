@@ -16,7 +16,20 @@ def _override_settings() -> Settings:
 
 
 @pytest.fixture
-def client() -> TestClient:
+def spawned_jobs(monkeypatch):
+    """Captures job_ids that /start would have handed to orchestrator.run."""
+    jobs: list[dict] = []
+
+    async def fake_run(supabase, job_id):
+        jobs.append({"supabase": supabase, "job_id": job_id})
+
+    monkeypatch.setattr("app.main.orchestrator.run", fake_run)
+    monkeypatch.setattr("app.main.get_supabase", lambda: "FAKE_SUPABASE")
+    return jobs
+
+
+@pytest.fixture
+def client(spawned_jobs) -> TestClient:
     app.dependency_overrides[get_settings] = _override_settings
     try:
         yield TestClient(app)
