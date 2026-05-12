@@ -31,6 +31,29 @@ class TestFetchUsers:
     def test_empty_table_returns_empty_list(self, sb):
         assert fetch_users(sb) == []
 
+    def test_strips_leading_and_trailing_whitespace(self, sb):
+        # Stray whitespace from manual SQL edits would otherwise crash
+        # letterboxdpy.User() with AssertionError("Invalid username").
+        sb.tables["Users"].extend([
+            {"lbusername": " jonleblanc", "is_discord": True},
+            {"lbusername": "alice ", "is_discord": True},
+            {"lbusername": "\tbob\n", "is_discord": True},
+            # NBSP is U+00A0; Python's str.strip() handles it.
+            {"lbusername": " carol ", "is_discord": True},
+        ])
+        result = fetch_users(sb)
+        assert sorted(result) == ["alice", "bob", "carol", "jonleblanc"]
+
+    def test_drops_empty_or_whitespace_only_usernames(self, sb):
+        sb.tables["Users"].extend([
+            {"lbusername": "alice", "is_discord": True},
+            {"lbusername": "", "is_discord": True},
+            {"lbusername": "   ", "is_discord": True},
+            {"lbusername": None, "is_discord": True},
+        ])
+        result = fetch_users(sb)
+        assert result == ["alice"]
+
 
 # ---------- missing ----------
 

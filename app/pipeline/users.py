@@ -6,6 +6,12 @@ def fetch_users(supabase: Client) -> list[str]:
 
     Filters to is_discord=true. The Hater Rankings audience is the discord crew;
     other users in the table (e.g. lurkers added during exploration) are excluded.
+
+    Whitespace-trims each username and drops empty/None entries. letterboxdpy
+    rejects anything that doesn't match ^[A-Za-z0-9_]+$, so a stray leading/
+    trailing space (including unicode whitespace like NBSP) would crash phase 1
+    with "AssertionError: Invalid username". Trimming here is the central
+    chokepoint — every downstream caller gets clean values.
     """
     resp = (
         supabase.table("Users")
@@ -13,4 +19,12 @@ def fetch_users(supabase: Client) -> list[str]:
         .eq("is_discord", True)
         .execute()
     )
-    return [row["lbusername"] for row in resp.data]
+    cleaned: list[str] = []
+    for row in resp.data:
+        raw = row.get("lbusername")
+        if not raw:
+            continue
+        trimmed = raw.strip()
+        if trimmed:
+            cleaned.append(trimmed)
+    return cleaned
