@@ -27,7 +27,9 @@ from uuid import UUID
 
 from supabase import Client
 
-from app.pipeline.film_ratings import scrape_and_upsert_film
+from letterboxdpy.core.exceptions import ResourceNotFoundError
+
+from app.pipeline.film_ratings import scrape_and_upsert_film, tombstone_film
 from app.pipeline.job_state import JobCancelled, JobState
 from app.pipeline.missing import get_missing_film_slugs
 from app.pipeline.user_films import scrape_and_upsert_user_films
@@ -82,23 +84,34 @@ async def _phase_missing_films(state: JobState, supabase: Client) -> list[str]:
 
 
 async def _phase_film_ratings(state: JobState, supabase: Client, slugs: list[str]) -> None:
-    state.set_phase("film_ratings", processed=0, total=len(slugs), current=None)
+    state.set_phase("film_ratings", processed=0, total=len(slugs), current=None, tombstoned=0)
     if not slugs:
         state.flush_progress()
         return
 
+    tombstoned = 0
     for i, slug in enumerate(slugs, start=1):
         _check_cancel(state)
         state.update_progress("film_ratings", current=slug)
         try:
             await asyncio.to_thread(scrape_and_upsert_film, supabase, slug)
             state.update_progress("film_ratings", processed=i)
+        except ResourceNotFoundError:
+            # Slug 404s on Letterboxd (renamed or removed). Insert a tombstone
+            # so get_missing_films() stops returning it on subsequent runs.
+            # Manual retry: DELETE the Films row.
+            await asyncio.to_thread(tombstone_film, supabase, slug)
+            tombstoned += 1
+            state.append_log(f"film_ratings: {slug} → tombstoned (404)")
+            state.update_progress("film_ratings", processed=i, tombstoned=tombstoned)
         except Exception as e:  # noqa: BLE001
             state.add_error("film_ratings", slug, e)
             state.update_progress("film_ratings", processed=i)
 
     state.flush_progress()
-    state.append_log(f"film_ratings complete: {len(slugs)} attempted")
+    state.append_log(
+        f"film_ratings complete: {len(slugs)} attempted, {tombstoned} tombstoned"
+    )
 
 
 async def run(supabase: Client, job_id: UUID) -> None:

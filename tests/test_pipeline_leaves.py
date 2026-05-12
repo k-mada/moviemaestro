@@ -167,3 +167,18 @@ class TestScrapeAndUpsertFilm:
         film_ratings.scrape_and_upsert_film(sb, "parasite")
         film_ratings.scrape_and_upsert_film(sb, "parasite")
         assert len(sb.tables["Films"]) == 1
+
+
+class TestTombstoneFilm:
+    def test_writes_stub_row_with_marker_url(self, sb):
+        film_ratings.tombstone_film(sb, "blank-check-on-broadway")
+        rows = sb.tables["Films"]
+        assert len(rows) == 1
+        assert rows[0]["film_slug"] == "blank-check-on-broadway"
+        assert rows[0]["url"] == film_ratings.TOMBSTONE_URL
+        assert rows[0]["lb_rating"] is None
+
+    def test_tombstone_dedupes_on_film_slug(self, sb):
+        film_ratings.tombstone_film(sb, "ghost-slug")
+        film_ratings.tombstone_film(sb, "ghost-slug")
+        assert len(sb.tables["Films"]) == 1

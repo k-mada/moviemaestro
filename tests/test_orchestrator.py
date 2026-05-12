@@ -154,6 +154,77 @@ class TestCancellation:
         assert row["finished_at"] is not None
 
 
+class TestTombstoneOn404:
+    @pytest.mark.asyncio
+    async def test_404_slug_tombstoned_not_errored(self, sb, monkeypatch):
+        from letterboxdpy.core.exceptions import MovieNotFoundError
+
+        sb.rpcs["get_missing_films"] = lambda: ["good", "ghost", "ugly"]
+
+        class FakeUser:
+            def __init__(self, _):
+                pass
+
+            def get_films(self):
+                return {"movies": {}}
+
+        class FakeMovie:
+            def __init__(self, slug):
+                if slug == "ghost":
+                    raise MovieNotFoundError(slug, f"https://letterboxd.com/film/{slug}/")
+                self.slug, self.url, self.title, self.rating = slug, "u", slug, 4.0
+                self.tmdb_link = self.poster = self.banner = None
+
+        monkeypatch.setattr(user_films, "User", FakeUser)
+        monkeypatch.setattr(film_ratings, "Movie", FakeMovie)
+
+        await orchestrator.run(sb, JOB_ID)
+        row = sb.get_refresh_job(JOB_ID)
+        assert row["status"] == "completed"
+        # 404'd slug must not pollute errors[].
+        assert not any(e["item"] == "ghost" for e in row["errors"])
+        # All three rows in Films: two real + one tombstone.
+        films_by_slug = {f["film_slug"]: f for f in sb.tables["Films"]}
+        assert set(films_by_slug) == {"good", "ghost", "ugly"}
+        assert films_by_slug["ghost"]["url"] == film_ratings.TOMBSTONE_URL
+        assert films_by_slug["ghost"]["lb_rating"] is None
+        # Counter surfaced on progress for UI/telemetry.
+        assert row["progress"]["film_ratings"]["tombstoned"] == 1
+        assert row["progress"]["film_ratings"]["processed"] == 3
+        # And a log line was written so operators can grep.
+        assert "ghost → tombstoned" in row["log_tail"]
+
+    @pytest.mark.asyncio
+    async def test_non_404_errors_still_recorded(self, sb, monkeypatch):
+        # Sibling check: only ResourceNotFoundError gets the tombstone treatment;
+        # other exceptions still flow to errors[].
+        sb.rpcs["get_missing_films"] = lambda: ["good", "broken"]
+
+        class FakeUser:
+            def __init__(self, _):
+                pass
+
+            def get_films(self):
+                return {"movies": {}}
+
+        class FakeMovie:
+            def __init__(self, slug):
+                if slug == "broken":
+                    raise ValueError("parse failed")
+                self.slug, self.url, self.title, self.rating = slug, "u", slug, 4.0
+                self.tmdb_link = self.poster = self.banner = None
+
+        monkeypatch.setattr(user_films, "User", FakeUser)
+        monkeypatch.setattr(film_ratings, "Movie", FakeMovie)
+
+        await orchestrator.run(sb, JOB_ID)
+        row = sb.get_refresh_job(JOB_ID)
+        assert any(e["item"] == "broken" for e in row["errors"])
+        # 'broken' did NOT get tombstoned (no Films row written for it).
+        assert all(f["film_slug"] != "broken" for f in sb.tables["Films"])
+        assert row["progress"]["film_ratings"]["tombstoned"] == 0
+
+
 class TestPerItemFailures:
     @pytest.mark.asyncio
     async def test_per_user_scrape_failure_continues_with_next_user(self, sb, monkeypatch):
