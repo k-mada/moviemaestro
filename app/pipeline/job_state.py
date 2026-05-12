@@ -124,29 +124,44 @@ class JobState:
     # --- terminal transitions -------------------------------------------------
 
     def complete(self) -> None:
-        self._write(
+        landed = self._write(
             {
                 "status": "completed",
                 "phase": None,
                 "finished_at": _utcnow_iso(),
                 "progress": self._progress,
                 "errors": self._errors,
-            }
+            },
+            only_if_running=True,
         )
-        log.info("job %s completed (errors=%d)", self.job_id, len(self._errors))
+        if landed:
+            log.info("job %s completed (errors=%d)", self.job_id, len(self._errors))
+        else:
+            log.info(
+                "job %s: complete() was a no-op — row is no longer 'running' "
+                "(cancellation raced ahead of the terminal write)",
+                self.job_id,
+            )
 
     def fail(self, message: str) -> None:
         self.append_log(f"FAILED: {message}")
-        self._write(
+        landed = self._write(
             {
                 "status": "failed",
                 "phase": None,
                 "finished_at": _utcnow_iso(),
                 "progress": self._progress,
                 "errors": self._errors + [{"phase": "orchestrator", "item": None, "error": message, "at": _utcnow_iso()}],
-            }
+            },
+            only_if_running=True,
         )
-        log.error("job %s failed: %s", self.job_id, message)
+        if landed:
+            log.error("job %s failed: %s", self.job_id, message)
+        else:
+            log.info(
+                "job %s: fail() was a no-op — row is no longer 'running' (cancellation raced ahead)",
+                self.job_id,
+            )
 
     def mark_cancelled(self) -> None:
         """Confirm a cancellation that was initiated externally (status flipped
@@ -164,7 +179,15 @@ class JobState:
 
     # --- raw write ------------------------------------------------------------
 
-    def _write(self, fields: dict[str, Any]) -> None:
+    def _write(self, fields: dict[str, Any], *, only_if_running: bool = False) -> bool:
         # Always include the current log_tail snapshot.
+        # only_if_running: terminal writes (complete/fail) pass this so an
+        # externally-set cancellation that landed between the last is_cancelled()
+        # poll and this write isn't clobbered. Returns whether the row was
+        # actually updated.
         payload = {**fields, "log_tail": "\n".join(self._log), "updated_at": _utcnow_iso()}
-        self.supabase.table("refresh_jobs").update(payload).eq("id", self.job_id).execute()
+        query = self.supabase.table("refresh_jobs").update(payload).eq("id", self.job_id)
+        if only_if_running:
+            query = query.eq("status", "running")
+        resp = query.execute()
+        return bool(getattr(resp, "data", None))

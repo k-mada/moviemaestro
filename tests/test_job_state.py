@@ -160,3 +160,25 @@ class TestTerminalStates:
         row = sb.get_refresh_job(JOB_ID)
         assert row["status"] == "cancelled"
         assert row["finished_at"] is not None
+
+    def test_complete_is_noop_when_row_already_cancelled(self, sb):
+        # Race: admin cancels between last is_cancelled() poll and complete().
+        # The terminal write must not overwrite the cancelled status.
+        sb.set_refresh_job_status(JOB_ID, "cancelled")
+        s = JobState(sb, JOB_ID)
+        s.complete()
+        row = sb.get_refresh_job(JOB_ID)
+        assert row["status"] == "cancelled"
+        # The guarded update should match zero rows.
+        update_writes = [w for w in sb.writes if w["op"] == "update"]
+        assert update_writes and update_writes[-1]["matched"] == 0
+
+    def test_fail_is_noop_when_row_already_cancelled(self, sb):
+        # Same race as above, but for the failure path.
+        sb.set_refresh_job_status(JOB_ID, "cancelled")
+        s = JobState(sb, JOB_ID)
+        s.fail("boom")
+        row = sb.get_refresh_job(JOB_ID)
+        assert row["status"] == "cancelled"
+        update_writes = [w for w in sb.writes if w["op"] == "update"]
+        assert update_writes and update_writes[-1]["matched"] == 0
