@@ -23,47 +23,47 @@ def _update_payloads(sb: FakeSupabase) -> list[dict]:
 
 class TestCancelDetection:
     def test_returns_false_for_running(self, sb):
-        s = JobState(sb, JOB_ID)
+        s = JobState(sb, JOB_ID, table='refresh_jobs')
         assert s.is_cancelled() is False
 
     def test_returns_true_for_cancelled(self, sb):
         sb.set_refresh_job_status(JOB_ID, "cancelled")
-        s = JobState(sb, JOB_ID)
+        s = JobState(sb, JOB_ID, table='refresh_jobs')
         assert s.is_cancelled() is True
 
     def test_returns_true_when_row_missing(self, sb):
-        s = JobState(sb, uuid4())  # unknown id
+        s = JobState(sb, uuid4(), table='refresh_jobs')  # unknown id
         # Defensive: a missing row means someone deleted it — treat as cancel.
         assert s.is_cancelled() is True
 
 
 class TestAnotherJobRunning:
     def test_false_when_only_self_running(self, sb):
-        s = JobState(sb, JOB_ID)
+        s = JobState(sb, JOB_ID, table='refresh_jobs')
         assert s.another_job_running() is False
 
     def test_true_when_another_job_running(self, sb):
         other = uuid4()
         sb.insert_refresh_job(other, status="running")
-        s = JobState(sb, JOB_ID)
+        s = JobState(sb, JOB_ID, table='refresh_jobs')
         assert s.another_job_running() is True
 
     def test_false_when_other_jobs_are_completed(self, sb):
         sb.insert_refresh_job(uuid4(), status="completed")
         sb.insert_refresh_job(uuid4(), status="cancelled")
-        s = JobState(sb, JOB_ID)
+        s = JobState(sb, JOB_ID, table='refresh_jobs')
         assert s.another_job_running() is False
 
 
 class TestProgressThrottling:
     def test_set_phase_writes_immediately(self, sb):
-        s = JobState(sb, JOB_ID)
+        s = JobState(sb, JOB_ID, table='refresh_jobs')
         s.set_phase("user_scrape", total=10)
         payloads = _update_payloads(sb)
         assert any("phase" in p and p["phase"] == "user_scrape" for p in payloads)
 
     def test_update_below_threshold_does_not_flush(self, sb):
-        s = JobState(sb, JOB_ID)
+        s = JobState(sb, JOB_ID, table='refresh_jobs')
         s.set_phase("user_scrape", total=10)
         sb.writes.clear()
         s.update_progress("user_scrape", processed=1)
@@ -74,7 +74,7 @@ class TestProgressThrottling:
         assert sb.writes == []
 
     def test_update_flushes_after_5_items(self, sb):
-        s = JobState(sb, JOB_ID)
+        s = JobState(sb, JOB_ID, table='refresh_jobs')
         s.set_phase("user_scrape", total=10)
         sb.writes.clear()
         for i in range(5):
@@ -83,7 +83,7 @@ class TestProgressThrottling:
         assert len(sb.writes) == 1
 
     def test_update_flushes_after_3_seconds(self, sb, monkeypatch):
-        s = JobState(sb, JOB_ID)
+        s = JobState(sb, JOB_ID, table='refresh_jobs')
         s.set_phase("user_scrape", total=10)
         sb.writes.clear()
         # Capture real monotonic before patching to avoid recursion in our shim.
@@ -95,7 +95,7 @@ class TestProgressThrottling:
         assert len(sb.writes) >= 1
 
     def test_flush_progress_forces_write(self, sb):
-        s = JobState(sb, JOB_ID)
+        s = JobState(sb, JOB_ID, table='refresh_jobs')
         s.set_phase("user_scrape", total=10)
         sb.writes.clear()
         s.update_progress("user_scrape", processed=1)
@@ -105,7 +105,7 @@ class TestProgressThrottling:
 
 class TestLogTail:
     def test_keeps_only_last_50_lines(self, sb):
-        s = JobState(sb, JOB_ID)
+        s = JobState(sb, JOB_ID, table='refresh_jobs')
         for i in range(60):
             s.append_log(f"line {i}")
         s.flush_progress()
@@ -120,7 +120,7 @@ class TestLogTail:
 
 class TestErrors:
     def test_add_error_appends_to_errors_array(self, sb):
-        s = JobState(sb, JOB_ID)
+        s = JobState(sb, JOB_ID, table='refresh_jobs')
         s.add_error("user_scrape", "alice", ValueError("nope"))
         row = sb.get_refresh_job(JOB_ID)
         assert len(row["errors"]) == 1
@@ -129,7 +129,7 @@ class TestErrors:
         assert row["errors"][0]["phase"] == "user_scrape"
 
     def test_add_error_writes_log_line_too(self, sb):
-        s = JobState(sb, JOB_ID)
+        s = JobState(sb, JOB_ID, table='refresh_jobs')
         s.add_error("film_ratings", "parasite", "boom")
         row = sb.get_refresh_job(JOB_ID)
         assert "ERROR film_ratings/parasite" in row["log_tail"]
@@ -137,7 +137,7 @@ class TestErrors:
 
 class TestTerminalStates:
     def test_complete_sets_status_and_finished_at(self, sb):
-        s = JobState(sb, JOB_ID)
+        s = JobState(sb, JOB_ID, table='refresh_jobs')
         s.complete()
         row = sb.get_refresh_job(JOB_ID)
         assert row["status"] == "completed"
@@ -145,7 +145,7 @@ class TestTerminalStates:
         assert row["phase"] is None
 
     def test_fail_sets_status_failed_and_records_message(self, sb):
-        s = JobState(sb, JOB_ID)
+        s = JobState(sb, JOB_ID, table='refresh_jobs')
         s.fail("DB unreachable")
         row = sb.get_refresh_job(JOB_ID)
         assert row["status"] == "failed"
@@ -155,7 +155,7 @@ class TestTerminalStates:
     def test_mark_cancelled_does_not_change_status(self, sb):
         # Cancellation flips status externally; we just stamp finished_at.
         sb.set_refresh_job_status(JOB_ID, "cancelled")
-        s = JobState(sb, JOB_ID)
+        s = JobState(sb, JOB_ID, table='refresh_jobs')
         s.mark_cancelled()
         row = sb.get_refresh_job(JOB_ID)
         assert row["status"] == "cancelled"
@@ -165,7 +165,7 @@ class TestTerminalStates:
         # Race: admin cancels between last is_cancelled() poll and complete().
         # The terminal write must not overwrite the cancelled status.
         sb.set_refresh_job_status(JOB_ID, "cancelled")
-        s = JobState(sb, JOB_ID)
+        s = JobState(sb, JOB_ID, table='refresh_jobs')
         s.complete()
         row = sb.get_refresh_job(JOB_ID)
         assert row["status"] == "cancelled"
@@ -176,7 +176,7 @@ class TestTerminalStates:
     def test_fail_is_noop_when_row_already_cancelled(self, sb):
         # Same race as above, but for the failure path.
         sb.set_refresh_job_status(JOB_ID, "cancelled")
-        s = JobState(sb, JOB_ID)
+        s = JobState(sb, JOB_ID, table='refresh_jobs')
         s.fail("boom")
         row = sb.get_refresh_job(JOB_ID)
         assert row["status"] == "cancelled"

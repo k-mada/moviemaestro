@@ -33,9 +33,12 @@ class JobCancelled(Exception):
 
 
 class JobState:
-    def __init__(self, supabase: Client, job_id: UUID) -> None:
+    def __init__(self, supabase: Client, job_id: UUID, *, table: str) -> None:
         self.supabase = supabase
         self.job_id = str(job_id)
+        # The refresh_jobs table holds bulk-refresh rows; user_scrape_jobs
+        # holds per-user rows. Every read/write goes against `self.table`.
+        self.table = table
         self._progress: dict[str, dict[str, Any]] = {}
         self._errors: list[dict[str, Any]] = []
         self._log: deque[str] = deque(maxlen=LOG_TAIL_LINES)
@@ -47,7 +50,7 @@ class JobState:
     def is_cancelled(self) -> bool:
         """One-shot poll of the job's status. Cheap (PK lookup)."""
         resp = (
-            self.supabase.table("refresh_jobs")
+            self.supabase.table(self.table)
             .select("status")
             .eq("id", self.job_id)
             .maybe_single()
@@ -59,9 +62,14 @@ class JobState:
         return resp.data["status"] == "cancelled"
 
     def another_job_running(self) -> bool:
-        """Defense-in-depth single-flight check: is another job 'running'?"""
+        """Defense-in-depth single-flight check: is another job 'running'?
+
+        Only meaningful for tables with a global single-flight invariant
+        (refresh_jobs). Per-user tables (user_scrape_jobs) scope uniqueness
+        per username at SQL, so callers in that path should skip this check.
+        """
         resp = (
-            self.supabase.table("refresh_jobs")
+            self.supabase.table(self.table)
             .select("id")
             .eq("status", "running")
             .neq("id", self.job_id)
@@ -186,7 +194,7 @@ class JobState:
         # poll and this write isn't clobbered. Returns whether the row was
         # actually updated.
         payload = {**fields, "log_tail": "\n".join(self._log), "updated_at": _utcnow_iso()}
-        query = self.supabase.table("refresh_jobs").update(payload).eq("id", self.job_id)
+        query = self.supabase.table(self.table).update(payload).eq("id", self.job_id)
         if only_if_running:
             query = query.eq("status", "running")
         resp = query.execute()

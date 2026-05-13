@@ -117,7 +117,7 @@ async def _phase_film_ratings(state: JobState, supabase: Client, slugs: list[str
 async def run(supabase: Client, job_id: UUID) -> None:
     """Drive the full refresh pipeline for one job. Designed to be spawned via
     asyncio.create_task() — never awaited from the request handler."""
-    state = JobState(supabase, job_id)
+    state = JobState(supabase, job_id, table="refresh_jobs")
     log.info("orchestrator starting job %s", job_id)
 
     try:
