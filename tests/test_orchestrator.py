@@ -64,7 +64,7 @@ class TestHappyPath:
                 "bob": {"movies": {"the-room": {"rating": 0.5, "liked": False, "name": "The Room"}}},
             },
         )
-        await orchestrator.run(sb, JOB_ID)
+        await orchestrator.run(sb, JOB_ID, table="refresh_jobs")
         row = sb.get_refresh_job(JOB_ID)
         assert row["status"] == "completed"
         assert row["finished_at"] is not None
@@ -87,7 +87,7 @@ class TestHappyPath:
                 "bob": {"movies": {}},
             },
         )
-        await orchestrator.run(sb, JOB_ID)
+        await orchestrator.run(sb, JOB_ID, table="refresh_jobs")
         row = sb.get_refresh_job(JOB_ID)
         assert row["progress"]["user_scrape"]["processed"] == 2
         assert row["progress"]["user_scrape"]["total"] == 2
@@ -98,7 +98,7 @@ class TestHappyPath:
     @pytest.mark.asyncio
     async def test_phase_order_in_log(self, sb, monkeypatch):
         _stub_letterboxdpy(monkeypatch)
-        await orchestrator.run(sb, JOB_ID)
+        await orchestrator.run(sb, JOB_ID, table="refresh_jobs")
         row = sb.get_refresh_job(JOB_ID)
         log = row["log_tail"]
         i_user = log.find("phase → user_scrape")
@@ -112,7 +112,7 @@ class TestCancellation:
     async def test_cancel_before_user_phase_exits_immediately(self, sb, monkeypatch):
         _stub_letterboxdpy(monkeypatch)
         sb.set_refresh_job_status(JOB_ID, "cancelled")
-        await orchestrator.run(sb, JOB_ID)
+        await orchestrator.run(sb, JOB_ID, table="refresh_jobs")
         row = sb.get_refresh_job(JOB_ID)
         assert row["status"] == "cancelled"  # untouched, just stamped
         assert row["finished_at"] is not None
@@ -146,7 +146,7 @@ class TestCancellation:
         monkeypatch.setattr(user_films, "User", FakeUser)
         monkeypatch.setattr(film_ratings, "Movie", FakeMovie)
 
-        await orchestrator.run(sb, JOB_ID)
+        await orchestrator.run(sb, JOB_ID, table="refresh_jobs")
         row = sb.get_refresh_job(JOB_ID)
         # Bailed mid-phase — not all 5 slugs processed.
         assert len(scraped) < 5
@@ -178,7 +178,7 @@ class TestTombstoneOn404:
         monkeypatch.setattr(user_films, "User", FakeUser)
         monkeypatch.setattr(film_ratings, "Movie", FakeMovie)
 
-        await orchestrator.run(sb, JOB_ID)
+        await orchestrator.run(sb, JOB_ID, table="refresh_jobs")
         row = sb.get_refresh_job(JOB_ID)
         assert row["status"] == "completed"
         # 404'd slug must not pollute errors[].
@@ -217,7 +217,7 @@ class TestTombstoneOn404:
         monkeypatch.setattr(user_films, "User", FakeUser)
         monkeypatch.setattr(film_ratings, "Movie", FakeMovie)
 
-        await orchestrator.run(sb, JOB_ID)
+        await orchestrator.run(sb, JOB_ID, table="refresh_jobs")
         row = sb.get_refresh_job(JOB_ID)
         assert any(e["item"] == "broken" for e in row["errors"])
         # 'broken' did NOT get tombstoned (no Films row written for it).
@@ -245,7 +245,7 @@ class TestPerItemFailures:
         monkeypatch.setattr(user_films, "User", FakeUser)
         monkeypatch.setattr(film_ratings, "Movie", FakeMovie)
 
-        await orchestrator.run(sb, JOB_ID)
+        await orchestrator.run(sb, JOB_ID, table="refresh_jobs")
         row = sb.get_refresh_job(JOB_ID)
         # Job still completed; alice recorded as error; bob processed normally.
         assert row["status"] == "completed"
@@ -273,7 +273,7 @@ class TestPerItemFailures:
         monkeypatch.setattr(user_films, "User", FakeUser)
         monkeypatch.setattr(film_ratings, "Movie", FakeMovie)
 
-        await orchestrator.run(sb, JOB_ID)
+        await orchestrator.run(sb, JOB_ID, table="refresh_jobs")
         row = sb.get_refresh_job(JOB_ID)
         assert row["status"] == "completed"
         assert any(e["item"] == "bad" for e in row["errors"])
@@ -287,7 +287,7 @@ class TestDefenseInDepth:
         _stub_letterboxdpy(monkeypatch)
         # Simulate a stale 'running' row from a previous crashed run.
         sb.insert_refresh_job(uuid4(), status="running")
-        await orchestrator.run(sb, JOB_ID)
+        await orchestrator.run(sb, JOB_ID, table="refresh_jobs")
         row = sb.get_refresh_job(JOB_ID)
         assert row["status"] == "failed"
         assert any("another job" in e["error"].lower() for e in row["errors"])
@@ -310,7 +310,150 @@ class TestStructuralFailure:
         monkeypatch.setattr(orchestrator, "fetch_users", boom)
 
         _stub_letterboxdpy(monkeypatch)
-        await orchestrator.run(sb, JOB_ID)
+        await orchestrator.run(sb, JOB_ID, table="refresh_jobs")
         row = sb.get_refresh_job(JOB_ID)
         assert row["status"] == "failed"
         assert any("ConnectionError" in e["error"] for e in row["errors"])
+
+
+# ---- Per-user mode (table='user_scrape_jobs', lbusername set) ---------------
+
+
+@pytest.fixture
+def sb_user_scope() -> FakeSupabase:
+    """A FakeSupabase preloaded with one user_scrape_jobs row for alice."""
+    s = FakeSupabase()
+    s.insert_refresh_job(JOB_ID, status="running", table="user_scrape_jobs", lbusername="alice")
+    s.insert_users("alice", "bob", is_discord=True)
+    return s
+
+
+class TestPerUserScope:
+    @pytest.mark.asyncio
+    async def test_only_target_user_is_scraped(self, sb_user_scope, monkeypatch):
+        """Phase 1 must touch alice only, not bob, even though bob is in Users."""
+        scraped_users: list[str] = []
+
+        class FakeUser:
+            def __init__(self, lbusername):
+                self.lbusername = lbusername
+                scraped_users.append(lbusername)
+
+            def get_films(self):
+                return {"movies": {"parasite": {"rating": 4.5, "liked": True, "name": "Parasite"}}}
+
+        class FakeMovie:
+            def __init__(self, slug):
+                self.slug, self.url, self.title, self.rating = slug, "u", slug, 4.0
+                self.tmdb_link = self.poster = self.banner = None
+
+        monkeypatch.setattr(user_films, "User", FakeUser)
+        monkeypatch.setattr(film_ratings, "Movie", FakeMovie)
+        sb_user_scope.rpcs["get_missing_films_for_user"] = lambda params: ["parasite"]
+
+        await orchestrator.run(
+            sb_user_scope, JOB_ID, table="user_scrape_jobs", lbusername="alice"
+        )
+
+        assert scraped_users == ["alice"]
+        row = sb_user_scope.get_refresh_job(JOB_ID, table="user_scrape_jobs")
+        assert row["status"] == "completed"
+
+    @pytest.mark.asyncio
+    async def test_phase2_uses_scoped_rpc(self, sb_user_scope, monkeypatch):
+        """Phase 2 calls get_missing_films_for_user, not get_missing_films."""
+        captured_params: list[dict] = []
+
+        def scoped_rpc(params):
+            captured_params.append(params)
+            return ["alice-only-slug"]
+
+        sb_user_scope.rpcs["get_missing_films_for_user"] = scoped_rpc
+        # Tripwire: bulk RPC should NOT be called in per-user mode.
+        sb_user_scope.rpcs["get_missing_films"] = lambda: pytest.fail(
+            "bulk get_missing_films RPC must not be called in per-user mode"
+        )
+
+        class FakeUser:
+            def __init__(self, _):
+                pass
+
+            def get_films(self):
+                return {"movies": {}}
+
+        class FakeMovie:
+            def __init__(self, slug):
+                self.slug, self.url, self.title, self.rating = slug, "u", slug, 4.0
+                self.tmdb_link = self.poster = self.banner = None
+
+        monkeypatch.setattr(user_films, "User", FakeUser)
+        monkeypatch.setattr(film_ratings, "Movie", FakeMovie)
+
+        await orchestrator.run(
+            sb_user_scope, JOB_ID, table="user_scrape_jobs", lbusername="alice"
+        )
+
+        assert captured_params == [{"p_lbusername": "alice"}]
+        # The slug returned by the scoped RPC actually got upserted to Films.
+        assert any(f["film_slug"] == "alice-only-slug" for f in sb_user_scope.tables["Films"])
+
+    @pytest.mark.asyncio
+    async def test_writes_go_to_user_scrape_jobs_not_refresh_jobs(self, sb_user_scope, monkeypatch):
+        """JobState's parameterized table routes all updates to user_scrape_jobs."""
+        _stub_letterboxdpy(monkeypatch)
+        sb_user_scope.rpcs["get_missing_films_for_user"] = lambda params: []
+
+        await orchestrator.run(
+            sb_user_scope, JOB_ID, table="user_scrape_jobs", lbusername="alice"
+        )
+
+        # All update writes from this job target user_scrape_jobs.
+        update_tables = {w["table"] for w in sb_user_scope.writes if w["op"] == "update"}
+        assert update_tables == {"user_scrape_jobs"}
+
+    @pytest.mark.asyncio
+    async def test_does_not_check_another_job_running(self, sb_user_scope, monkeypatch):
+        """Per-user must NOT trip the global another-job-running defense.
+        Two different per-user jobs (different usernames) are allowed to run
+        concurrently — single-flight is per-username at SQL."""
+        _stub_letterboxdpy(monkeypatch)
+        sb_user_scope.rpcs["get_missing_films_for_user"] = lambda params: []
+        # Seed a *second* per-user job (bob's, also running) and assert our
+        # alice job completes anyway.
+        other_job = uuid4()
+        sb_user_scope.insert_refresh_job(
+            other_job, status="running", table="user_scrape_jobs", lbusername="bob"
+        )
+
+        await orchestrator.run(
+            sb_user_scope, JOB_ID, table="user_scrape_jobs", lbusername="alice"
+        )
+
+        row = sb_user_scope.get_refresh_job(JOB_ID, table="user_scrape_jobs")
+        assert row["status"] == "completed"
+        # The other running job is untouched.
+        other = sb_user_scope.get_refresh_job(other_job, table="user_scrape_jobs")
+        assert other["status"] == "running"
+
+    @pytest.mark.asyncio
+    async def test_progress_shape_matches_bulk(self, sb_user_scope, monkeypatch):
+        """All 3 phases left progress on the per-user job, same shape as bulk
+        — the client UI can render the same <JobProgress> component for both."""
+        _stub_letterboxdpy(
+            monkeypatch,
+            user_films_per_user={
+                "alice": {"movies": {"parasite": {"rating": 4.5, "liked": True, "name": "Parasite"}}},
+            },
+        )
+        sb_user_scope.rpcs["get_missing_films_for_user"] = lambda params: ["parasite"]
+
+        await orchestrator.run(
+            sb_user_scope, JOB_ID, table="user_scrape_jobs", lbusername="alice"
+        )
+
+        row = sb_user_scope.get_refresh_job(JOB_ID, table="user_scrape_jobs")
+        assert row["progress"]["user_scrape"]["processed"] == 1
+        assert row["progress"]["user_scrape"]["total"] == 1
+        assert row["progress"]["missing_films"]["count"] == 1
+        assert row["progress"]["film_ratings"]["processed"] == 1
+        assert row["progress"]["film_ratings"]["total"] == 1

@@ -29,9 +29,10 @@ from supabase import Client
 
 from letterboxdpy.core.exceptions import ResourceNotFoundError
 
+from app.pipeline import letterboxd_throttle
 from app.pipeline.film_ratings import scrape_and_upsert_film, tombstone_film
 from app.pipeline.job_state import JobCancelled, JobState
-from app.pipeline.missing import get_missing_film_slugs
+from app.pipeline.missing import get_missing_film_slugs, get_missing_film_slugs_for_user
 from app.pipeline.user_films import scrape_and_upsert_user_films
 from app.pipeline.users import fetch_users
 
@@ -43,21 +44,25 @@ def _check_cancel(state: JobState) -> None:
         raise JobCancelled()
 
 
-async def _phase_user_scrape(state: JobState, supabase: Client) -> None:
+async def _phase_user_scrape(
+    state: JobState, supabase: Client, lbusername: str | None = None
+) -> None:
     state.set_phase("user_scrape", processed=0, total=0, current=None, films_added=0)
-    users = await asyncio.to_thread(fetch_users, supabase)
+    # Per-user scope: only this one username; skip the DB roundtrip to
+    # fetch_users.
+    users = [lbusername] if lbusername else await asyncio.to_thread(fetch_users, supabase)
     total = len(users)
     state.update_progress("user_scrape", total=total)
     state.flush_progress()
     state.append_log(f"user_scrape: {total} users to process")
 
     films_added = 0
-    for i, lbusername in enumerate(users, start=1):
+    for i, lbu in enumerate(users, start=1):
         _check_cancel(state)
-        state.update_progress("user_scrape", current=lbusername)
+        state.update_progress("user_scrape", current=lbu)
         try:
-            count = await asyncio.to_thread(
-                scrape_and_upsert_user_films, supabase, lbusername
+            count = await letterboxd_throttle.call(
+                scrape_and_upsert_user_films, supabase, lbu
             )
             films_added += count
             state.update_progress(
@@ -66,17 +71,24 @@ async def _phase_user_scrape(state: JobState, supabase: Client) -> None:
                 films_added=films_added,
             )
         except Exception as e:  # noqa: BLE001 — record + continue
-            state.add_error("user_scrape", lbusername, e)
+            state.add_error("user_scrape", lbu, e)
             state.update_progress("user_scrape", processed=i)
 
     state.flush_progress()
     state.append_log(f"user_scrape complete: {films_added} films across {total} users")
 
 
-async def _phase_missing_films(state: JobState, supabase: Client) -> list[str]:
+async def _phase_missing_films(
+    state: JobState, supabase: Client, lbusername: str | None = None
+) -> list[str]:
     state.set_phase("missing_films", count=0)
     _check_cancel(state)
-    slugs = await asyncio.to_thread(get_missing_film_slugs, supabase)
+    if lbusername:
+        slugs = await asyncio.to_thread(
+            get_missing_film_slugs_for_user, supabase, lbusername
+        )
+    else:
+        slugs = await asyncio.to_thread(get_missing_film_slugs, supabase)
     state.update_progress("missing_films", count=len(slugs))
     state.flush_progress()
     state.append_log(f"missing_films: {len(slugs)} slugs to fetch")
@@ -94,7 +106,7 @@ async def _phase_film_ratings(state: JobState, supabase: Client, slugs: list[str
         _check_cancel(state)
         state.update_progress("film_ratings", current=slug)
         try:
-            await asyncio.to_thread(scrape_and_upsert_film, supabase, slug)
+            await letterboxd_throttle.call(scrape_and_upsert_film, supabase, slug)
             state.update_progress("film_ratings", processed=i)
         except ResourceNotFoundError:
             # Slug 404s on Letterboxd (renamed or removed). Insert a tombstone
@@ -114,22 +126,44 @@ async def _phase_film_ratings(state: JobState, supabase: Client, slugs: list[str
     )
 
 
-async def run(supabase: Client, job_id: UUID) -> None:
-    """Drive the full refresh pipeline for one job. Designed to be spawned via
-    asyncio.create_task() — never awaited from the request handler."""
-    state = JobState(supabase, job_id, table="refresh_jobs")
-    log.info("orchestrator starting job %s", job_id)
+async def run(
+    supabase: Client,
+    job_id: UUID,
+    *,
+    table: str,
+    lbusername: str | None = None,
+) -> None:
+    """Drive the refresh pipeline for one job. Designed to be spawned via
+    asyncio.create_task() — never awaited from the request handler.
+
+    Args:
+        table: 'refresh_jobs' for the bulk path, 'user_scrape_jobs' for
+            per-user. Determines which table JobState reads/writes.
+        lbusername: when set, phase 1 scrapes only this user and phase 2
+            scopes its missing-films query to that user's UserFilms rows.
+            When None, the bulk behavior runs (all is_discord users + all
+            missing slugs).
+    """
+    state = JobState(supabase, job_id, table=table)
+    log.info(
+        "orchestrator starting job %s (table=%s, lbusername=%s)",
+        job_id,
+        table,
+        lbusername or "*",
+    )
 
     try:
-        # Defense in depth — the partial unique index already prevents two
-        # 'running' rows, but if that ever changed (or a stale row got missed)
-        # this catches it without trampling the other job.
-        if state.another_job_running():
+        # Defense-in-depth for the bulk path only: the bulk partial unique
+        # index is global, so this catches a stale 'running' row that
+        # somehow slipped past it. The per-user path's uniqueness is scoped
+        # per-username at SQL, so this global check would falsely trip
+        # whenever two /fetcher users overlap — skip it there.
+        if lbusername is None and state.another_job_running():
             state.fail("another job is already running")
             return
 
-        await _phase_user_scrape(state, supabase)
-        slugs = await _phase_missing_films(state, supabase)
+        await _phase_user_scrape(state, supabase, lbusername)
+        slugs = await _phase_missing_films(state, supabase, lbusername)
         await _phase_film_ratings(state, supabase, slugs)
 
         state.complete()

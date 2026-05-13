@@ -74,7 +74,9 @@ async def start(payload: StartRequest) -> StartResponse:
     # Fire-and-forget. The orchestrator updates refresh_jobs as it runs;
     # the caller observes progress via Realtime, not via this response.
     supabase = get_supabase()
-    task = asyncio.create_task(orchestrator.run(supabase, payload.job_id))
+    task = asyncio.create_task(
+        orchestrator.run(supabase, payload.job_id, table="refresh_jobs")
+    )
     _background_tasks.add(task)
     _active_jobs[payload.job_id] = task
 

@@ -43,7 +43,7 @@ class FakeSupabase:
         return _Table(self, name)
 
     def rpc(self, name: str, params: dict | None = None) -> "_Rpc":
-        return _Rpc(self, name)
+        return _Rpc(self, name, params)
 
     # --- helpers for tests ----------------------------------------------------
 
@@ -51,8 +51,10 @@ class FakeSupabase:
         for u in usernames:
             self.tables["Users"].append({"lbusername": u, "is_discord": is_discord})
 
-    def insert_refresh_job(self, job_id: UUID, status: str = "running") -> None:
-        self.tables["refresh_jobs"].append(
+    def insert_refresh_job(
+        self, job_id: UUID, status: str = "running", *, table: str = "refresh_jobs", **extra: Any
+    ) -> None:
+        self.tables.setdefault(table, []).append(
             {
                 "id": str(job_id),
                 "status": status,
@@ -60,17 +62,20 @@ class FakeSupabase:
                 "progress": {},
                 "errors": [],
                 "log_tail": "",
+                **extra,
             }
         )
 
-    def get_refresh_job(self, job_id: UUID) -> dict | None:
-        for r in self.tables["refresh_jobs"]:
+    def get_refresh_job(self, job_id: UUID, *, table: str = "refresh_jobs") -> dict | None:
+        for r in self.tables.get(table, []):
             if r["id"] == str(job_id):
                 return r
         return None
 
-    def set_refresh_job_status(self, job_id: UUID, status: str) -> None:
-        row = self.get_refresh_job(job_id)
+    def set_refresh_job_status(
+        self, job_id: UUID, status: str, *, table: str = "refresh_jobs"
+    ) -> None:
+        row = self.get_refresh_job(job_id, table=table)
         if row is None:
             raise KeyError(job_id)
         row["status"] = status
@@ -187,10 +192,20 @@ class _Table:
 class _Rpc:
     sb: FakeSupabase
     name: str
+    params: dict | None = None
 
     def execute(self):
         if self.name not in self.sb.rpcs:
             raise NotImplementedError(f"rpc {self.name} not stubbed in fake")
         fn = self.sb.rpcs[self.name]
-        data = fn() if callable(fn) else fn
-        return _Resp(data=data)
+        if not callable(fn):
+            return _Resp(data=fn)
+        # Stubs can be either zero-arg (legacy `lambda: [...]`) or take the
+        # params dict. Try the params form first; fall back if the stub
+        # doesn't accept args.
+        if self.params is not None:
+            try:
+                return _Resp(data=fn(self.params))
+            except TypeError:
+                pass
+        return _Resp(data=fn())

@@ -85,7 +85,7 @@ class TestIdempotency:
 
         spawned: list[str] = []
 
-        async def never_done(supabase, job_id):
+        async def never_done(supabase, job_id, *, table, lbusername=None):
             spawned.append(str(job_id))
             await asyncio.sleep(60)
 

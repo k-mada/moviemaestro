@@ -20,8 +20,10 @@ def spawned_jobs(monkeypatch):
     """Captures job_ids that /start would have handed to orchestrator.run."""
     jobs: list[dict] = []
 
-    async def fake_run(supabase, job_id):
-        jobs.append({"supabase": supabase, "job_id": job_id})
+    async def fake_run(supabase, job_id, *, table, lbusername=None):
+        jobs.append(
+            {"supabase": supabase, "job_id": job_id, "table": table, "lbusername": lbusername}
+        )
 
     monkeypatch.setattr("app.main.orchestrator.run", fake_run)
     monkeypatch.setattr("app.main.get_supabase", lambda: "FAKE_SUPABASE")
