@@ -47,6 +47,11 @@ class StartRequest(BaseModel):
     job_id: UUID
 
 
+class ScrapeUserRequest(BaseModel):
+    job_id: UUID
+    lbusername: str
+
+
 class StartResponse(BaseModel):
     job_id: UUID
     status: str
@@ -57,6 +62,38 @@ def healthz() -> dict[str, bool]:
     return {"ok": True}
 
 
+async def _spawn(
+    job_id: UUID, *, table: str, lbusername: str | None = None
+) -> StartResponse:
+    """Idempotent fire-and-forget orchestrator spawn, shared between /start
+    and /scrape-user. The orchestrator updates the job row as it runs; the
+    caller observes progress via Realtime, not via this response.
+
+    In-process dedupe via _active_jobs prevents a network-retried POST from
+    spawning a second orchestrator for the same job_id within this process.
+    Cross-process safety lives in the SQL partial unique indexes on
+    refresh_jobs and user_scrape_jobs, which bpdiscord catches at INSERT.
+    """
+    existing = _active_jobs.get(job_id)
+    if existing is not None and not existing.done():
+        log.info("spawn ignored — job already running in this process: %s", job_id)
+        return StartResponse(job_id=job_id, status="already_running")
+
+    supabase = get_supabase()
+    task = asyncio.create_task(
+        orchestrator.run(supabase, job_id, table=table, lbusername=lbusername)
+    )
+    _background_tasks.add(task)
+    _active_jobs[job_id] = task
+
+    def _on_done(t: asyncio.Task) -> None:
+        _background_tasks.discard(t)
+        _active_jobs.pop(job_id, None)
+
+    task.add_done_callback(_on_done)
+    return StartResponse(job_id=job_id, status="accepted")
+
+
 @app.post(
     "/start",
     status_code=status.HTTP_202_ACCEPTED,
@@ -65,24 +102,23 @@ def healthz() -> dict[str, bool]:
 )
 async def start(payload: StartRequest) -> StartResponse:
     log.info("start request received: job_id=%s", payload.job_id)
-    # Idempotent: if this job_id is already in flight, ack without re-spawning.
-    existing = _active_jobs.get(payload.job_id)
-    if existing is not None and not existing.done():
-        log.info("start ignored — job already running in this process: %s", payload.job_id)
-        return StartResponse(job_id=payload.job_id, status="already_running")
+    return await _spawn(payload.job_id, table="refresh_jobs")
 
-    # Fire-and-forget. The orchestrator updates refresh_jobs as it runs;
-    # the caller observes progress via Realtime, not via this response.
-    supabase = get_supabase()
-    task = asyncio.create_task(
-        orchestrator.run(supabase, payload.job_id, table="refresh_jobs")
+
+@app.post(
+    "/scrape-user",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=StartResponse,
+    dependencies=[Depends(require_worker_secret)],
+)
+async def scrape_user(payload: ScrapeUserRequest) -> StartResponse:
+    log.info(
+        "scrape-user request received: job_id=%s lbusername=%s",
+        payload.job_id,
+        payload.lbusername,
     )
-    _background_tasks.add(task)
-    _active_jobs[payload.job_id] = task
-
-    def _on_done(t: asyncio.Task) -> None:
-        _background_tasks.discard(t)
-        _active_jobs.pop(payload.job_id, None)
-
-    task.add_done_callback(_on_done)
-    return StartResponse(job_id=payload.job_id, status="accepted")
+    return await _spawn(
+        payload.job_id,
+        table="user_scrape_jobs",
+        lbusername=payload.lbusername,
+    )
