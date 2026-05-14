@@ -131,6 +131,61 @@ class TestScrapeAndUpsertUserFilms:
         assert len(rows) == 1
         assert rows[0]["rating"] == 5.0
 
+    def test_writes_user_ratings_histogram(self, sb, monkeypatch):
+        """The aggregated rating-level histogram lands in UserRatings.
+
+        Today's bulk path never touched UserRatings — the legacy Vercel
+        cron was the only writer. Now moviemaestro keeps the histogram
+        fresh for both bulk and per-user flows, so /fetcher users see
+        up-to-date averages even if the cron is broken or skipped.
+        """
+        films = {
+            "movies": {
+                "a": {"rating": 4.5, "liked": True, "name": "A"},
+                "b": {"rating": 4.5, "liked": False, "name": "B"},
+                "c": {"rating": 4.0, "liked": False, "name": "C"},
+                "d": {"rating": None, "liked": False, "name": "D"},  # unrated, ignored
+            }
+        }
+        monkeypatch.setattr(user_films, "User", lambda u: _FakeUser(u, films))
+        user_films.scrape_and_upsert_user_films(sb, "alice")
+
+        ratings = sorted(sb.tables["UserRatings"], key=lambda r: r["rating"])
+        # Two distinct rating levels; unrated film is not counted.
+        assert ratings == [
+            {"username": "alice", "rating": 4.0, "count": 1},
+            {"username": "alice", "rating": 4.5, "count": 2},
+        ]
+
+    def test_user_ratings_upsert_overwrites_on_rescrape(self, sb, monkeypatch):
+        """A second scrape with updated ratings replaces the level counts."""
+        films = {"movies": {"a": {"rating": 4.5, "liked": False, "name": "A"}}}
+        monkeypatch.setattr(user_films, "User", lambda u: _FakeUser(u, films))
+        user_films.scrape_and_upsert_user_films(sb, "alice")
+        assert sb.tables["UserRatings"] == [
+            {"username": "alice", "rating": 4.5, "count": 1}
+        ]
+        # User adds a second 4.5-star rating.
+        films["movies"]["b"] = {"rating": 4.5, "liked": False, "name": "B"}
+        user_films.scrape_and_upsert_user_films(sb, "alice")
+        ratings = [r for r in sb.tables["UserRatings"] if r["username"] == "alice"]
+        assert len(ratings) == 1
+        assert ratings[0]["count"] == 2
+
+    def test_no_user_ratings_written_when_user_has_no_rated_films(self, sb, monkeypatch):
+        """A user with films but zero rated entries gets no histogram rows."""
+        films = {
+            "movies": {
+                "a": {"rating": None, "liked": False, "name": "A"},
+                "b": {"rating": None, "liked": False, "name": "B"},
+            }
+        }
+        monkeypatch.setattr(user_films, "User", lambda u: _FakeUser(u, films))
+        user_films.scrape_and_upsert_user_films(sb, "alice")
+        # UserFilms got the two unrated rows, UserRatings got nothing.
+        assert len(sb.tables["UserFilms"]) == 2
+        assert sb.tables.get("UserRatings", []) == []
+
 
 # ---------- film_ratings ----------
 
