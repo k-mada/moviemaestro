@@ -8,7 +8,7 @@ dependencies = [
     "uvicorn[standard]>=0.30",
     "supabase>=2.5",
     "pydantic-settings>=2.4",
-    "letterboxdpy @ git+https://github.com/nmcassa/letterboxdpy.git@v6.5.4",
+    "letterboxdpy @ git+https://github.com/nmcassa/letterboxdpy.git@v6.5.7",
 ]
 
 [project.optional-dependencies]
