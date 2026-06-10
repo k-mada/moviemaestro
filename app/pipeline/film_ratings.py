@@ -10,22 +10,29 @@ from supabase import Client
 TOMBSTONE_URL = "unreachable"
 
 
+def _upsert_film_rpc(supabase: Client, params: dict) -> None:
+    # Wraps the upsert_film() Postgres function. INSERT...ON CONFLICT with
+    # per-column COALESCE so a NULL in `params` never clobbers an existing
+    # non-NULL value. See migration 20260610200000_add_upsert_film_function.sql.
+    supabase.rpc("upsert_film", params).execute()
+
+
 def scrape_and_upsert_film(supabase: Client, slug: str) -> None:
     """Scrape one Letterboxd film and upsert into Films.
 
     Raises whatever letterboxdpy raises on failure — caller catches and records.
     """
     movie = Movie(slug)
-    row = {
-        "film_slug": movie.slug,
-        "url": movie.url,
-        "title": movie.title,
-        "lb_rating": movie.rating,
-        "tmdb_link": getattr(movie, "tmdb_link", None),
-        "poster": getattr(movie, "poster", None),
-        "banner": getattr(movie, "banner", None),
-    }
-    supabase.table("Films").upsert(row, on_conflict="film_slug").execute()
+    _upsert_film_rpc(supabase, {
+        "p_film_slug":    movie.slug,
+        "p_title":        movie.title,
+        "p_lb_rating":    movie.rating,
+        "p_url":          movie.url,
+        "p_tmdb_link":    getattr(movie, "tmdb_link", None),
+        "p_poster":       getattr(movie, "poster", None),
+        "p_banner":       getattr(movie, "banner", None),
+        "p_release_year": getattr(movie, "year", None),
+    })
 
 
 def tombstone_film(supabase: Client, slug: str) -> None:
@@ -35,7 +42,13 @@ def tombstone_film(supabase: Client, slug: str) -> None:
     so a stub row — even with lb_rating NULL — keeps the slug out of future
     runs. Manual retry: DELETE FROM "Films" WHERE film_slug = '...'.
     """
-    supabase.table("Films").upsert(
-        {"film_slug": slug, "url": TOMBSTONE_URL, "lb_rating": None},
-        on_conflict="film_slug",
-    ).execute()
+    _upsert_film_rpc(supabase, {
+        "p_film_slug":    slug,
+        "p_title":        None,
+        "p_lb_rating":    None,
+        "p_url":          TOMBSTONE_URL,
+        "p_tmdb_link":    None,
+        "p_poster":       None,
+        "p_banner":       None,
+        "p_release_year": None,
+    })
