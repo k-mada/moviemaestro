@@ -198,6 +198,15 @@ class _FakeMovie:
         self.tmdb_link = f"https://themoviedb.org/movie/{slug}"
         self.poster = None
         self.banner = None
+        self.year = 2020
+
+
+def _make_fake_movie(year: int | None = 2020):
+    def _factory(slug: str) -> _FakeMovie:
+        m = _FakeMovie(slug)
+        m.year = year
+        return m
+    return _factory
 
 
 class TestScrapeAndUpsertFilm:
@@ -209,6 +218,21 @@ class TestScrapeAndUpsertFilm:
         assert rows[0]["film_slug"] == "parasite"
         assert rows[0]["lb_rating"] == 4.0
         assert rows[0]["title"] == "Parasite"
+        assert rows[0]["release_year"] == 2020
+
+    def test_null_release_year_does_not_clobber_existing(self, sb, monkeypatch):
+        # First scrape lands release_year=2010. Second scrape, where year
+        # parsing fails (Movie.year is None), must NOT overwrite 2010 — the
+        # COALESCE in upsert_film() owns this invariant.
+        monkeypatch.setattr(film_ratings, "Movie", _make_fake_movie(year=2010))
+        film_ratings.scrape_and_upsert_film(sb, "inception")
+        assert sb.tables["Films"][0]["release_year"] == 2010
+
+        monkeypatch.setattr(film_ratings, "Movie", _make_fake_movie(year=None))
+        film_ratings.scrape_and_upsert_film(sb, "inception")
+        rows = [r for r in sb.tables["Films"] if r["film_slug"] == "inception"]
+        assert len(rows) == 1
+        assert rows[0]["release_year"] == 2010
 
     def test_letterboxdpy_exception_propagates(self, sb, monkeypatch):
         def boom(_):

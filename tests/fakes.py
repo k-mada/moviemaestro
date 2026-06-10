@@ -11,6 +11,11 @@ Supported per-table operations:
   .table(name).update(payload).eq("id", uuid).execute()
   .table(name).upsert(rows).execute()  # ignores on_conflict; PK-equivalent dedupe
   .rpc(fn).execute()
+
+Built-in RPC stubs:
+  upsert_film(params) — emulates the COALESCE-preserve upsert for the Films
+  table so callers of scrape_and_upsert_film / tombstone_film exercise the
+  same never-clobber-non-NULL semantics the Postgres function provides.
 """
 
 from __future__ import annotations
@@ -35,9 +40,34 @@ class FakeSupabase:
             "refresh_jobs": [],
         }
         # RPC stubs: name -> callable returning data
-        self.rpcs: dict[str, Any] = {"get_missing_films": lambda: []}
+        self.rpcs: dict[str, Any] = {
+            "get_missing_films": lambda: [],
+            "upsert_film": self._upsert_film_rpc,
+        }
         # Capture every write call for assertions (chronological).
         self.writes: list[dict[str, Any]] = []
+
+    def _upsert_film_rpc(self, params: dict) -> None:
+        # Mirrors the upsert_film() Postgres function: per-column COALESCE so
+        # a NULL in params never overwrites an existing non-NULL value.
+        rows = self.tables.setdefault("Films", [])
+        incoming = {
+            "film_slug":    params["p_film_slug"],
+            "title":        params["p_title"],
+            "lb_rating":    params["p_lb_rating"],
+            "url":          params["p_url"],
+            "tmdb_link":    params["p_tmdb_link"],
+            "poster":       params["p_poster"],
+            "banner":       params["p_banner"],
+            "release_year": params["p_release_year"],
+        }
+        for r in rows:
+            if r.get("film_slug") == incoming["film_slug"]:
+                for k, v in incoming.items():
+                    if v is not None:
+                        r[k] = v
+                return
+        rows.append(incoming)
 
     def table(self, name: str) -> "_Table":
         return _Table(self, name)
