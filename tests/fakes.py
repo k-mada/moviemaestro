@@ -8,7 +8,10 @@ Supported per-table operations:
   .table(name).select("*").eq(col, val).execute()
   .table(name).select("status").eq("id", uuid).maybe_single().execute()
   .table(name).select("id").eq(...).neq(...).limit(1).execute()
+  .table(name).select("col").is_("col", "null").order("col").limit(n).execute()
+  .table(name).select("col").gt("col", "x").execute()
   .table(name).update(payload).eq("id", uuid).execute()
+  .table(name).update(payload).eq(...).is_("col", "null").execute()
   .table(name).upsert(rows).execute()  # ignores on_conflict; PK-equivalent dedupe
   .rpc(fn).execute()
 
@@ -114,7 +117,7 @@ class FakeSupabase:
 @dataclass
 class _Filter:
     col: str
-    op: str  # "eq" | "neq"
+    op: str  # "eq" | "neq" | "gt" | "is_null" | "is_not_null"
     val: Any
 
     def matches(self, row: dict) -> bool:
@@ -122,6 +125,15 @@ class _Filter:
             return row.get(self.col) == self.val
         if self.op == "neq":
             return row.get(self.col) != self.val
+        if self.op == "gt":
+            # PostgREST-equivalent strict greater-than. Rows where the column
+            # is None never match (matches Postgres' NULL > x → NULL → false).
+            v = row.get(self.col)
+            return v is not None and v > self.val
+        if self.op == "is_null":
+            return row.get(self.col) is None
+        if self.op == "is_not_null":
+            return row.get(self.col) is not None
         raise NotImplementedError(self.op)
 
 
@@ -132,6 +144,7 @@ class _Table:
     _select_cols: str | None = None
     _filters: list[_Filter] = field(default_factory=list)
     _limit: int | None = None
+    _order_by: str | None = None
     _maybe_single: bool = False
     _action: str | None = None
     _payload: Any = None
@@ -162,6 +175,30 @@ class _Table:
         self._filters.append(_Filter(col, "neq", val))
         return self
 
+    def gt(self, col: str, val: Any) -> "_Table":
+        self._filters.append(_Filter(col, "gt", val))
+        return self
+
+    def is_(self, col: str, val: str) -> "_Table":
+        # PostgREST surface accepts ?col=is.null / ?col=is.not.null. supabase-py
+        # exposes that as .is_(col, "null") / .is_(col, "not.null"). Other
+        # values (is.true / is.false) aren't used in this codebase yet.
+        if val == "null":
+            self._filters.append(_Filter(col, "is_null", None))
+        elif val in ("not.null", "not_null"):
+            self._filters.append(_Filter(col, "is_not_null", None))
+        else:
+            raise NotImplementedError(f"is_({col!r}, {val!r})")
+        return self
+
+    def order(self, col: str, desc: bool = False) -> "_Table":
+        # Single-column ascending only — that's all supabase-py callers in this
+        # project use. Add desc/multi-col support when something needs it.
+        if desc:
+            raise NotImplementedError("desc ordering not supported in fake yet")
+        self._order_by = col
+        return self
+
     def limit(self, n: int) -> "_Table":
         self._limit = n
         return self
@@ -175,6 +212,10 @@ class _Table:
 
         if self._action == "select":
             matched = [r for r in rows if all(f.matches(r) for f in self._filters)]
+            if self._order_by is not None:
+                # None sorts last so callers don't accidentally page through it.
+                matched.sort(key=lambda r: (r.get(self._order_by) is None,
+                                            r.get(self._order_by)))
             if self._limit is not None:
                 matched = matched[: self._limit]
             if self._maybe_single:

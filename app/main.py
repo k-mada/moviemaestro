@@ -5,10 +5,10 @@ from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.db import get_supabase
-from app.pipeline import orchestrator
+from app.pipeline import backfill_years, orchestrator
 from app.settings import Settings, get_settings
 
 # In-process dedupe: a network retry of /start with the same job_id should not
@@ -57,6 +57,28 @@ class StartResponse(BaseModel):
     status: str
 
 
+class BackfillFailure(BaseModel):
+    film_slug: str
+    error: str
+
+
+class BackfillRequest(BaseModel):
+    # Ceiling of 200 is a soft guard against blowing through Railway's HTTP
+    # edge timeout. At Semaphore(1) serialization + ~1–2 s per Letterboxd
+    # page, batch_size=200 is ~5–7 minutes worst case. Stage 4b drives the
+    # cadence; pick lower if it tightens.
+    batch_size: int = Field(default=100, ge=1, le=200)
+    after_slug: str | None = None
+    dry_run: bool = False
+
+
+class BackfillResponse(BaseModel):
+    processed: int
+    updated: int
+    failures: list[BackfillFailure]
+    next_after_slug: str | None
+
+
 @app.get("/healthz")
 def healthz() -> dict[str, bool]:
     return {"ok": True}
@@ -103,6 +125,32 @@ async def _spawn(
 async def start(payload: StartRequest) -> StartResponse:
     log.info("start request received: job_id=%s", payload.job_id)
     return await _spawn(payload.job_id, table="refresh_jobs")
+
+
+@app.post(
+    "/backfill-film-years",
+    response_model=BackfillResponse,
+    dependencies=[Depends(require_worker_secret)],
+)
+async def backfill_film_years(payload: BackfillRequest) -> BackfillResponse:
+    log.info(
+        "backfill request: batch_size=%d after_slug=%s dry_run=%s",
+        payload.batch_size,
+        payload.after_slug,
+        payload.dry_run,
+    )
+    result = await backfill_years.run_batch(
+        get_supabase(),
+        batch_size=payload.batch_size,
+        after_slug=payload.after_slug,
+        dry_run=payload.dry_run,
+    )
+    return BackfillResponse(
+        processed=result.processed,
+        updated=result.updated,
+        failures=[BackfillFailure(**f) for f in result.failures],
+        next_after_slug=result.next_after_slug,
+    )
 
 
 @app.post(
