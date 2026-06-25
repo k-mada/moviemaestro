@@ -182,3 +182,34 @@ class TestTerminalStates:
         assert row["status"] == "cancelled"
         update_writes = [w for w in sb.writes if w["op"] == "update"]
         assert update_writes and update_writes[-1]["matched"] == 0
+
+    def test_fail_blocked_sets_failed_with_reason(self, sb):
+        s = JobState(sb, JOB_ID, table="refresh_jobs")
+        s.fail_blocked("user_scrape", RuntimeError("IP blocked"))
+        row = sb.get_refresh_job(JOB_ID)
+        assert row["status"] == "failed"
+        assert row["finished_at"] is not None
+        blocked = [e for e in row["errors"] if e.get("reason") == "letterboxd_blocked"]
+        assert len(blocked) == 1
+        assert blocked[0]["phase"] == "user_scrape"
+        assert blocked[0]["item"] is None
+        assert "RuntimeError: IP blocked" in blocked[0]["error"]
+
+    def test_fail_blocked_preserves_prior_errors(self, sb):
+        s = JobState(sb, JOB_ID, table="refresh_jobs")
+        s.add_error("user_scrape", "alice", ValueError("alice broke"))
+        s.fail_blocked("user_scrape", RuntimeError("IP blocked"))
+        row = sb.get_refresh_job(JOB_ID)
+        assert any(e["item"] == "alice" for e in row["errors"])
+        assert any(e.get("reason") == "letterboxd_blocked" for e in row["errors"])
+
+    def test_fail_blocked_is_noop_when_row_already_cancelled(self, sb):
+        # Same cancel race as fail(): the only_if_running guard must let the
+        # external cancellation win.
+        sb.set_refresh_job_status(JOB_ID, "cancelled")
+        s = JobState(sb, JOB_ID, table="refresh_jobs")
+        s.fail_blocked("user_scrape", RuntimeError("IP blocked"))
+        row = sb.get_refresh_job(JOB_ID)
+        assert row["status"] == "cancelled"
+        update_writes = [w for w in sb.writes if w["op"] == "update"]
+        assert update_writes and update_writes[-1]["matched"] == 0
