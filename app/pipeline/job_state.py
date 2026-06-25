@@ -32,6 +32,17 @@ class JobCancelled(Exception):
     """Raised when the orchestrator detects the job was cancelled."""
 
 
+class JobBlocked(Exception):
+    """Raised when a Letterboxd request is blocked (Cloudflare IP flag / 429)
+    and retries are exhausted. Aborts the run; the orchestrator records it as a
+    terminal failure tagged reason='letterboxd_blocked'."""
+
+    def __init__(self, phase: str, error: Exception) -> None:
+        self.phase = phase
+        self.error = error
+        super().__init__(f"blocked in {phase}: {type(error).__name__}: {error}")
+
+
 class JobState:
     def __init__(self, supabase: Client, job_id: UUID, *, table: str) -> None:
         self.supabase = supabase
@@ -168,6 +179,40 @@ class JobState:
         else:
             log.info(
                 "job %s: fail() was a no-op — row is no longer 'running' (cancellation raced ahead)",
+                self.job_id,
+            )
+
+    def fail_blocked(self, phase: str, error: Exception) -> None:
+        """Terminal transition for a Letterboxd block. Same write as fail(),
+        but the appended error carries reason='letterboxd_blocked' so clients
+        can distinguish a transient, retry-worthy block from a generic failure.
+        Reuses only_if_running so a racing cancel still wins."""
+        msg = f"{type(error).__name__}: {error}"
+        self.append_log(f"BLOCKED ({phase}): {msg}")
+        landed = self._write(
+            {
+                "status": "failed",
+                "phase": None,
+                "finished_at": _utcnow_iso(),
+                "progress": self._progress,
+                "errors": self._errors
+                + [
+                    {
+                        "phase": phase,
+                        "item": None,
+                        "error": msg,
+                        "reason": "letterboxd_blocked",
+                        "at": _utcnow_iso(),
+                    }
+                ],
+            },
+            only_if_running=True,
+        )
+        if landed:
+            log.warning("job %s blocked by Letterboxd during %s phase", self.job_id, phase)
+        else:
+            log.info(
+                "job %s: fail_blocked() was a no-op — row no longer 'running' (cancellation raced)",
                 self.job_id,
             )
 

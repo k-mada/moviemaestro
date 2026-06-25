@@ -14,7 +14,7 @@ from uuid import uuid4
 
 import pytest
 
-from app.pipeline import film_ratings, orchestrator, user_films
+from app.pipeline import film_ratings, letterboxd_throttle, orchestrator, user_films
 from tests.fakes import FakeSupabase
 
 JOB_ID = uuid4()
@@ -279,6 +279,111 @@ class TestPerItemFailures:
         assert any(e["item"] == "bad" for e in row["errors"])
         # 2 of 3 actually upserted to Films.
         assert len(sb.tables["Films"]) == 2
+
+
+class TestBlockHandling:
+    @pytest.fixture(autouse=True)
+    def _no_retry(self, monkeypatch):
+        # Disable throttle retries so a block propagates immediately (no waits).
+        monkeypatch.setattr(letterboxd_throttle, "_RETRY_BACKOFF_SECONDS", ())
+
+    @pytest.mark.asyncio
+    async def test_block_fails_fast_with_reason(self, sb, monkeypatch):
+        from letterboxdpy.core.exceptions import AccessDeniedError
+
+        scraped: list[str] = []
+
+        class FakeUser:
+            def __init__(self, lbusername):
+                scraped.append(lbusername)
+
+            def get_films(self):
+                raise AccessDeniedError("IP blocked")
+
+        monkeypatch.setattr(user_films, "User", FakeUser)
+
+        await orchestrator.run(sb, JOB_ID, table="refresh_jobs")
+        row = sb.get_refresh_job(JOB_ID)
+
+        assert row["status"] == "failed"
+        blocked = [e for e in row["errors"] if e.get("reason") == "letterboxd_blocked"]
+        assert len(blocked) == 1
+        assert blocked[0]["phase"] == "user_scrape"
+        # Fail-fast: aborted on the first user, never reached bob or phase 3.
+        assert scraped == ["alice"]
+        assert sb.tables["Films"] == []
+
+    @pytest.mark.asyncio
+    async def test_429_rate_limit_is_treated_as_a_block(self, sb, monkeypatch):
+        from letterboxdpy.core.exceptions import InvalidResponseError
+
+        class FakeUser:
+            def __init__(self, _):
+                pass
+
+            def get_films(self):
+                raise InvalidResponseError("rate limited", code=429)
+
+        monkeypatch.setattr(user_films, "User", FakeUser)
+
+        await orchestrator.run(sb, JOB_ID, table="refresh_jobs")
+        row = sb.get_refresh_job(JOB_ID)
+        assert row["status"] == "failed"
+        assert any(e.get("reason") == "letterboxd_blocked" for e in row["errors"])
+
+    @pytest.mark.asyncio
+    async def test_block_in_film_ratings_phase_fails(self, sb, monkeypatch):
+        # A block can also strike phase 3 (film scrape). Same fail-fast path.
+        from letterboxdpy.core.exceptions import AccessDeniedError
+
+        class FakeUser:
+            def __init__(self, _):
+                pass
+
+            def get_films(self):
+                return {"movies": {}}
+
+        class FakeMovie:
+            def __init__(self, slug):
+                raise AccessDeniedError("IP blocked")
+
+        monkeypatch.setattr(user_films, "User", FakeUser)
+        monkeypatch.setattr(film_ratings, "Movie", FakeMovie)
+
+        await orchestrator.run(sb, JOB_ID, table="refresh_jobs")
+        row = sb.get_refresh_job(JOB_ID)
+        assert row["status"] == "failed"
+        blocked = [e for e in row["errors"] if e.get("reason") == "letterboxd_blocked"]
+        assert len(blocked) == 1
+        assert blocked[0]["phase"] == "film_ratings"
+
+    @pytest.mark.asyncio
+    async def test_private_profile_is_not_a_block(self, sb, monkeypatch):
+        # PrivateRouteError is a per-user state, not an IP block: record + continue.
+        from letterboxdpy.core.exceptions import PrivateRouteError
+
+        class FakeUser:
+            def __init__(self, lbusername):
+                self.lbusername = lbusername
+
+            def get_films(self):
+                if self.lbusername == "alice":
+                    raise PrivateRouteError("alice is private")
+                return {"movies": {}}
+
+        class FakeMovie:
+            def __init__(self, slug):
+                self.slug, self.url, self.title, self.rating = slug, "u", slug, 4.0
+                self.tmdb_link = self.poster = self.banner = None
+
+        monkeypatch.setattr(user_films, "User", FakeUser)
+        monkeypatch.setattr(film_ratings, "Movie", FakeMovie)
+
+        await orchestrator.run(sb, JOB_ID, table="refresh_jobs")
+        row = sb.get_refresh_job(JOB_ID)
+        assert row["status"] == "completed"
+        alice_err = next(e for e in row["errors"] if e["item"] == "alice")
+        assert "reason" not in alice_err
 
 
 class TestDefenseInDepth:

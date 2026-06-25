@@ -31,7 +31,7 @@ from letterboxdpy.core.exceptions import ResourceNotFoundError
 
 from app.pipeline import letterboxd_throttle
 from app.pipeline.film_ratings import scrape_and_upsert_film, tombstone_film
-from app.pipeline.job_state import JobCancelled, JobState
+from app.pipeline.job_state import JobBlocked, JobCancelled, JobState
 from app.pipeline.missing import get_missing_film_slugs, get_missing_film_slugs_for_user
 from app.pipeline.user_films import scrape_and_upsert_user_films
 from app.pipeline.users import fetch_users
@@ -71,6 +71,10 @@ async def _phase_user_scrape(
                 films_added=films_added,
             )
         except Exception as e:  # noqa: BLE001 — record + continue
+            if letterboxd_throttle.is_block_error(e):
+                # The block is IP-global: every remaining user would 403 too,
+                # and hammering a flagged IP prolongs the block. Abort the run.
+                raise JobBlocked("user_scrape", e) from e
             state.add_error("user_scrape", lbu, e)
             state.update_progress("user_scrape", processed=i)
 
@@ -117,6 +121,8 @@ async def _phase_film_ratings(state: JobState, supabase: Client, slugs: list[str
             state.append_log(f"film_ratings: {slug} → tombstoned (404)")
             state.update_progress("film_ratings", processed=i, tombstoned=tombstoned)
         except Exception as e:  # noqa: BLE001
+            if letterboxd_throttle.is_block_error(e):
+                raise JobBlocked("film_ratings", e) from e
             state.add_error("film_ratings", slug, e)
             state.update_progress("film_ratings", processed=i)
 
@@ -169,6 +175,8 @@ async def run(
         state.complete()
     except JobCancelled:
         state.mark_cancelled()
+    except JobBlocked as b:
+        state.fail_blocked(b.phase, b.error)
     except Exception as e:  # noqa: BLE001
         log.exception("orchestrator crashed")
         state.fail(f"{type(e).__name__}: {e}")
