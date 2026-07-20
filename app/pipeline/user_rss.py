@@ -16,6 +16,7 @@ from curl_cffi import requests
 from supabase import Client
 
 from app.pipeline import letterboxd_throttle
+from app.pipeline.user_ratings import refresh_user_ratings
 
 RSS_URL = "https://letterboxd.com/{}/rss/"
 WATCH_GUID_PREFIX = "letterboxd-watch-"
@@ -127,6 +128,10 @@ async def refresh_user_from_rss(supabase: Client, lbusername: str) -> RefreshRes
     supabase.table("UserFilms").upsert(
         rows, on_conflict="lbusername,film_slug"
     ).execute()
+
+    # Recompute from the full UserFilms rows, not just these ~50 feed items
+    # (which would clobber the real totals). Shared with the grid path.
+    refresh_user_ratings(supabase, lbusername)
 
     return RefreshResult(
         lbusername=lbusername, watch_items=len(films), upserted=len(rows)
