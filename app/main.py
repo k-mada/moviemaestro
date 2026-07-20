@@ -175,10 +175,7 @@ async def refresh_user(payload: RefreshUserRequest) -> RefreshUserResponse:
             get_supabase(), payload.lbusername
         )
     except user_rss.RssFetchError as e:
-        # Distinguish a failed/blocked fetch from a successful empty refresh so
-        # the caller (bpdiscord) can react. RSS is expected to survive Railway
-        # egress, so a non-200 here means private/nonexistent user or an
-        # upstream Letterboxd/Cloudflare failure — a bad gateway, not our bug.
+        # A failed/blocked fetch is a bad gateway, not an empty refresh.
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e)
         ) from e
