@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "moviemaestro",
+  "project_id": "ce57da10-9988-4181-89c6-0ee2cf2d1e8f"
+}

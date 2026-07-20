@@ -8,7 +8,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
 from app.db import get_supabase
-from app.pipeline import backfill_years, orchestrator
+from app.pipeline import backfill_years, orchestrator, user_rss
 from app.settings import Settings, get_settings
 
 # In-process dedupe: a network retry of /start with the same job_id should not
@@ -50,6 +50,16 @@ class StartRequest(BaseModel):
 class ScrapeUserRequest(BaseModel):
     job_id: UUID
     lbusername: str
+
+
+class RefreshUserRequest(BaseModel):
+    lbusername: str
+
+
+class RefreshUserResponse(BaseModel):
+    lbusername: str
+    watch_items: int
+    upserted: int
 
 
 class StartResponse(BaseModel):
@@ -150,6 +160,29 @@ async def backfill_film_years(payload: BackfillRequest) -> BackfillResponse:
         updated=result.updated,
         failures=[BackfillFailure(**f) for f in result.failures],
         next_after_slug=result.next_after_slug,
+    )
+
+
+@app.post(
+    "/refresh-user",
+    response_model=RefreshUserResponse,
+    dependencies=[Depends(require_worker_secret)],
+)
+async def refresh_user(payload: RefreshUserRequest) -> RefreshUserResponse:
+    log.info("refresh-user request received: lbusername=%s", payload.lbusername)
+    try:
+        result = await user_rss.refresh_user_from_rss(
+            get_supabase(), payload.lbusername
+        )
+    except user_rss.RssFetchError as e:
+        # A failed/blocked fetch is a bad gateway, not an empty refresh.
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e)
+        ) from e
+    return RefreshUserResponse(
+        lbusername=result.lbusername,
+        watch_items=result.watch_items,
+        upserted=result.upserted,
     )
 
 

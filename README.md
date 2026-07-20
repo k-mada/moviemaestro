@@ -11,18 +11,21 @@ Pulls user film ratings via [letterboxdpy](https://github.com/nmcassa/letterboxd
 
 ## Local development
 
+Uses [uv](https://docs.astral.sh/uv/) for env + dependency management (`brew install uv`).
+
 ```bash
-python3.13 -m venv venv
-source venv/bin/activate
-pip install -e ".[dev]"
-cp .env.example .env  # fill in real values
-uvicorn app.main:app --reload
+cp .env.example .env      # fill in real values (first time only)
+uv run uvicorn app.main:app --reload   # syncs deps into .venv, then serves
 ```
+
+Serves on http://127.0.0.1:8000 (interactive docs at `/docs`). `uv run` creates
+`.venv` and installs from `uv.lock` on first use, so there's no separate setup
+step. Shortcuts: `make run`, `make test`.
 
 ## Tests
 
 ```bash
-pytest
+uv run pytest   # or: make test
 ```
 
 ## Deployment
