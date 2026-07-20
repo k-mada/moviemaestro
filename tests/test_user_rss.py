@@ -149,11 +149,27 @@ class TestRefreshUpsert:
         upsert_writes = [w for w in sb.writes if w["op"] == "upsert"]
         assert upsert_writes[-1]["on_conflict"] == "lbusername,film_slug"
 
-    async def test_does_not_touch_userratings(self, monkeypatch):
+    async def test_refreshes_userratings_histogram(self, monkeypatch):
         sb = FakeSupabase()
         monkeypatch.setattr(user_rss, "_fetch_rss", lambda user: FEED)
         await user_rss.refresh_user_from_rss(sb, "tester")
-        assert sb.tables.get("UserRatings", []) == []
+        # Two rated watch items at 3.5; the unrated one is not counted.
+        assert sb.tables["UserRatings"] == [
+            {"username": "tester", "rating": 3.5, "count": 2}
+        ]
+
+    async def test_histogram_reflects_full_userfilms_not_just_feed(self, monkeypatch):
+        sb = FakeSupabase()
+        # A prior full backfill left 10 films rated 5.0; the ~50-item feed can't
+        # see them. The histogram must still count all 10, not just the feed.
+        for i in range(10):
+            sb.tables["UserFilms"].append(
+                {"lbusername": "tester", "film_slug": f"old-{i}", "rating": 5.0}
+            )
+        monkeypatch.setattr(user_rss, "_fetch_rss", lambda user: FEED)
+        await user_rss.refresh_user_from_rss(sb, "tester")
+        hist = {r["rating"]: r["count"] for r in sb.tables["UserRatings"]}
+        assert hist == {5.0: 10, 3.5: 2}
 
     async def test_last_write_wins_overwrites_existing_rating_with_null(
         self, monkeypatch

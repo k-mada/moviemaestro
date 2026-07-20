@@ -39,6 +39,7 @@ class FakeSupabase:
         self.tables: dict[str, list[dict[str, Any]]] = {
             "Users": [],
             "UserFilms": [],
+            "UserRatings": [],
             "Films": [],
             "refresh_jobs": [],
         }
@@ -46,6 +47,7 @@ class FakeSupabase:
         self.rpcs: dict[str, Any] = {
             "get_missing_films": lambda: [],
             "upsert_film": self._upsert_film_rpc,
+            "refresh_user_ratings": self._refresh_user_ratings_rpc,
         }
         # Capture every write call for assertions (chronological).
         self.writes: list[dict[str, Any]] = []
@@ -71,6 +73,19 @@ class FakeSupabase:
                         r[k] = v
                 return
         rows.append(incoming)
+
+    def _refresh_user_ratings_rpc(self, params: dict) -> None:
+        # Mirrors the refresh_user_ratings() Postgres function: full-replace the
+        # user's histogram by re-aggregating their UserFilms rows by rating.
+        username = params["p_username"]
+        ur = self.tables.setdefault("UserRatings", [])
+        ur[:] = [r for r in ur if r.get("username") != username]
+        counts: dict[float, int] = {}
+        for r in self.tables.get("UserFilms", []):
+            if r.get("lbusername") == username and r.get("rating") is not None:
+                counts[r["rating"]] = counts.get(r["rating"], 0) + 1
+        for rating, count in counts.items():
+            ur.append({"username": username, "rating": rating, "count": count})
 
     def table(self, name: str) -> "_Table":
         return _Table(self, name)
