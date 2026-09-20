@@ -1,0 +1,2 @@
+# sampler start 2026-06-25T18:31:52Z worker=https://moviemaestro-production.up.railway.app probes=2 interval=1800s ticks=24
+2026-06-25T18:32:03Z tick=1 pass=2 block=0 other=0 | cum_pass=2 cum_block=0 cum_block_rate=0.0%
