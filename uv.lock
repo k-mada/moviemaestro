@@ -515,8 +515,8 @@ wheels = [
 
 [[package]]
 name = "letterboxdpy"
-version = "6.5.7"
-source = { git = "https://github.com/nmcassa/letterboxdpy.git?rev=v6.5.7#36def6be4877f2c7870f56408d4c17efac874644" }
+version = "6.5.13"
+source = { git = "https://github.com/nmcassa/letterboxdpy.git?rev=v6.5.13#0e287495efeb081000575e063d09dfe2090545cb" }
 dependencies = [
     { name = "beautifulsoup4" },
     { name = "curl-cffi" },
@@ -669,7 +669,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "fastapi", specifier = ">=0.110" },
-    { name = "letterboxdpy", git = "https://github.com/nmcassa/letterboxdpy.git?rev=v6.5.7" },
+    { name = "letterboxdpy", git = "https://github.com/nmcassa/letterboxdpy.git?rev=v6.5.13" },
     { name = "pydantic-settings", specifier = ">=2.4" },
     { name = "supabase", specifier = ">=2.5" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
