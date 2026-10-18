@@ -18,12 +18,17 @@ def _upsert_film_rpc(supabase: Client, params: dict) -> None:
 
 
 def scrape_and_upsert_film(supabase: Client, slug: str) -> None:
-    """Scrape one Letterboxd film and upsert into Films.
+    """Scrape one Letterboxd film, upsert into Films, and fold any duplicate
+    Films rows sharing its tmdb_link into the just-scraped (live) slug.
+
+    The upsert and the merge run in one transaction server-side, so a merge
+    failure rolls the upsert back and the slug stays in missing_films for retry.
+    See migration <ts>_add_upsert_film_and_merge_function.sql (bpdiscord).
 
     Raises whatever letterboxdpy raises on failure — caller catches and records.
     """
     movie = Movie(slug)
-    _upsert_film_rpc(supabase, {
+    supabase.rpc("upsert_film_and_merge_duplicates", {
         "p_film_slug":    movie.slug,
         "p_title":        movie.title,
         "p_lb_rating":    movie.rating,
@@ -32,7 +37,7 @@ def scrape_and_upsert_film(supabase: Client, slug: str) -> None:
         "p_poster":       getattr(movie, "poster", None),
         "p_banner":       getattr(movie, "banner", None),
         "p_release_year": getattr(movie, "year", None),
-    })
+    }).execute()
 
 
 def tombstone_film(supabase: Client, slug: str) -> None:

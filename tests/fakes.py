@@ -23,9 +23,13 @@ Built-in RPC stubs:
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID
+
+# Mirrors the RPC's identity guard: only a real, non-zero TMDB movie/tv id.
+_TMDB_ID = re.compile(r"/(movie|tv)/[1-9][0-9]*/?$")
 
 
 @dataclass
@@ -48,9 +52,12 @@ class FakeSupabase:
             "get_missing_films": lambda: [],
             "upsert_film": self._upsert_film_rpc,
             "refresh_user_ratings": self._refresh_user_ratings_rpc,
+            "upsert_film_and_merge_duplicates": self._upsert_film_and_merge_rpc,
         }
         # Capture every write call for assertions (chronological).
         self.writes: list[dict[str, Any]] = []
+        # Canonical slugs passed to the merge RPC, in call order.
+        self.merge_calls: list[str] = []
 
     def _upsert_film_rpc(self, params: dict) -> None:
         # Mirrors the upsert_film() Postgres function: per-column COALESCE so
@@ -86,6 +93,68 @@ class FakeSupabase:
                 counts[r["rating"]] = counts.get(r["rating"], 0) + 1
         for rating, count in counts.items():
             ur.append({"username": username, "rating": rating, "count": count})
+
+    def _upsert_film_and_merge_rpc(self, params: dict) -> int:
+        # Mirrors upsert_film_and_merge_duplicates(): upsert the canonical film,
+        # then fold every other same-tmdb_link slug into it. Returns the number
+        # of merged (deleted) Films rows. Records the call for assertions.
+        self._upsert_film_rpc(params)
+        canonical = params["p_film_slug"]
+        self.merge_calls.append(canonical)
+
+        films = self.tables.setdefault("Films", [])
+        row = next((r for r in films if r.get("film_slug") == canonical), None)
+        v_tmdb = row.get("tmdb_link") if row else None
+        if not v_tmdb or not _TMDB_ID.search(v_tmdb):
+            return 0
+
+        loser_slugs = {
+            r["film_slug"]
+            for r in films
+            if r.get("tmdb_link") == v_tmdb and r.get("film_slug") != canonical
+        }
+        if not loser_slugs:
+            return 0
+
+        uf = self.tables.setdefault("UserFilms", [])
+        affected = sorted(
+            {r["lbusername"] for r in uf if r.get("film_slug") in loser_slugs}
+        )
+
+        for owner in affected:
+            has_canonical = any(
+                r for r in uf
+                if r.get("lbusername") == owner and r.get("film_slug") == canonical
+            )
+            owner_losers = [
+                r for r in uf
+                if r.get("lbusername") == owner and r.get("film_slug") in loser_slugs
+            ]
+            if not has_canonical and owner_losers:
+                # Promote the best loser row to the canonical slug; the rest fall
+                # into the delete below. Ordering mirrors the RPC's DISTINCT ON:
+                # prefer a real positive rating, then higher rating, then slug.
+                best = min(
+                    owner_losers,
+                    key=lambda r: (
+                        not (r.get("rating") not in (None, 0)),
+                        -(r.get("rating") or 0),
+                        r.get("film_slug") or "",
+                    ),
+                )
+                best["film_slug"] = canonical
+                owner_losers.remove(best)
+            for r in owner_losers:
+                uf.remove(r)
+
+        fr = self.tables.setdefault("FilmRatings", [])
+        fr[:] = [r for r in fr if r.get("film_slug") not in loser_slugs]
+        films[:] = [r for r in films if r.get("film_slug") not in loser_slugs]
+
+        for owner in affected:
+            self._refresh_user_ratings_rpc({"p_username": owner})
+
+        return len(loser_slugs)
 
     def table(self, name: str) -> "_Table":
         return _Table(self, name)
