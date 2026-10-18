@@ -248,6 +248,77 @@ class TestScrapeAndUpsertFilm:
         assert len(sb.tables["Films"]) == 1
 
 
+def _movie_with_tmdb(tmdb_link: str | None):
+    def _factory(slug: str) -> _FakeMovie:
+        m = _FakeMovie(slug)
+        m.tmdb_link = tmdb_link
+        return m
+    return _factory
+
+
+_TMDB_550 = "https://www.themoviedb.org/movie/550/"
+
+
+class TestScrapeAndUpsertFilmMerge:
+    def test_merge_folds_stale_slug_into_live_slug(self, sb, monkeypatch):
+        sb.tables["Films"].append(
+            {"film_slug": "fight-club", "tmdb_link": _TMDB_550, "title": "Fight Club"}
+        )
+        sb.tables["UserFilms"].append(
+            {"lbusername": "alice", "film_slug": "fight-club", "rating": 4.0}
+        )
+        monkeypatch.setattr(film_ratings, "Movie", _movie_with_tmdb(_TMDB_550))
+
+        film_ratings.scrape_and_upsert_film(sb, "fight-club-1999")
+
+        films = sb.tables["Films"]
+        assert [r["film_slug"] for r in films] == ["fight-club-1999"]
+        uf = sb.tables["UserFilms"]
+        assert [r["film_slug"] for r in uf] == ["fight-club-1999"]
+        assert sb.merge_calls == ["fight-club-1999"]
+
+    def test_owner_holding_both_slugs_histogram_corrected(self, sb, monkeypatch):
+        sb.tables["Films"] += [
+            {"film_slug": "fight-club", "tmdb_link": _TMDB_550, "title": "Fight Club"},
+            {"film_slug": "fight-club-1999", "tmdb_link": _TMDB_550, "title": "Fight Club"},
+        ]
+        sb.tables["UserFilms"] += [
+            {"lbusername": "alice", "film_slug": "fight-club", "rating": 4.0},
+            {"lbusername": "alice", "film_slug": "fight-club-1999", "rating": 4.0},
+        ]
+        sb.tables["UserRatings"].append(
+            {"username": "alice", "rating": 4.0, "count": 2}
+        )
+        monkeypatch.setattr(film_ratings, "Movie", _movie_with_tmdb(_TMDB_550))
+
+        film_ratings.scrape_and_upsert_film(sb, "fight-club-1999")
+
+        alice_uf = [r for r in sb.tables["UserFilms"] if r["lbusername"] == "alice"]
+        assert [r["film_slug"] for r in alice_uf] == ["fight-club-1999"]
+        counts = {r["rating"]: r["count"] for r in sb.tables["UserRatings"]}
+        assert counts == {4.0: 1}
+
+    def test_no_tmdb_link_writes_film_without_merging(self, sb, monkeypatch):
+        sb.tables["Films"].append(
+            {"film_slug": "other", "tmdb_link": _TMDB_550, "title": "Other"}
+        )
+        monkeypatch.setattr(film_ratings, "Movie", _movie_with_tmdb(None))
+
+        film_ratings.scrape_and_upsert_film(sb, "no-tmdb-film")
+
+        slugs = {r["film_slug"] for r in sb.tables["Films"]}
+        assert slugs == {"other", "no-tmdb-film"}
+        assert sb.merge_calls == ["no-tmdb-film"]
+
+    def test_no_duplicates_is_noop(self, sb, monkeypatch):
+        monkeypatch.setattr(film_ratings, "Movie", _movie_with_tmdb(_TMDB_550))
+
+        film_ratings.scrape_and_upsert_film(sb, "fight-club-1999")
+
+        assert [r["film_slug"] for r in sb.tables["Films"]] == ["fight-club-1999"]
+        assert sb.tables["UserFilms"] == []
+
+
 class TestTombstoneFilm:
     def test_writes_stub_row_with_marker_url(self, sb):
         film_ratings.tombstone_film(sb, "blank-check-on-broadway")
