@@ -1,7 +1,7 @@
 """Top-level pipeline driver. One coroutine per refresh job.
 
 Phases run sequentially:
-  1. user_scrape   — for each user in Users (is_discord=true), scrape rated
+  1. user_scrape   — for each user in Users, scrape rated
                      films via letterboxdpy, upsert UserFilms.
   2. missing_films — call get_missing_films RPC, find films UserFilms references
                      but Films doesn't have.
@@ -147,7 +147,7 @@ async def run(
             per-user. Determines which table JobState reads/writes.
         lbusername: when set, phase 1 scrapes only this user and phase 2
             scopes its missing-films query to that user's UserFilms rows.
-            When None, the bulk behavior runs (all is_discord users + all
+            When None, the bulk behavior runs (all Users rows + all
             missing slugs).
     """
     state = JobState(supabase, job_id, table=table)

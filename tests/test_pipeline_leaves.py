@@ -22,11 +22,11 @@ def sb() -> FakeSupabase:
 # ---------- users ----------
 
 class TestFetchUsers:
-    def test_returns_only_discord_users(self, sb):
+    def test_includes_non_discord_users(self, sb):
         sb.insert_users("alice", "bob", is_discord=True)
-        sb.insert_users("lurker", is_discord=False)
+        sb.insert_users("guest", is_discord=False)
         result = fetch_users(sb)
-        assert sorted(result) == ["alice", "bob"]
+        assert sorted(result) == ["alice", "bob", "guest"]
 
     def test_empty_table_returns_empty_list(self, sb):
         assert fetch_users(sb) == []
