@@ -4,8 +4,9 @@ from supabase import Client
 def fetch_users(supabase: Client) -> list[str]:
     """Return the list of Letterboxd usernames the refresh pipeline should run for.
 
-    Filters to is_discord=true. The Hater Rankings audience is the discord crew;
-    other users in the table (e.g. lurkers added during exploration) are excluded.
+    Every Users row, Discord member or not: non-Discord profiles are compared
+    against on bpdiscord, so their data must stay as fresh as everyone else's.
+    The Stats audience gate (is_discord) is applied by bpdiscord's reads.
 
     Whitespace-trims each username and drops empty/None entries. letterboxdpy
     rejects anything that doesn't match ^[A-Za-z0-9_]+$, so a stray leading/
@@ -16,7 +17,6 @@ def fetch_users(supabase: Client) -> list[str]:
     resp = (
         supabase.table("Users")
         .select("lbusername")
-        .eq("is_discord", True)
         .execute()
     )
     cleaned: list[str] = []
